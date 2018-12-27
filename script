@@ -1,0 +1,108 @@
+node {
+   def mvnHome
+   def server=Artifactory.server "giri_art"
+    try{
+
+       stage('Preparation') {
+           
+         git "https://github.com/gireeshgg/springMvc.git"
+         mvnHome=tool 'Maven'
+        }
+        stage('SonarQube'){
+          withSonarQubeEnv('Sonar')  {
+              withEnv( ["PATH+MAVEN=${mvnHome}/bin"] ) {
+                sh "mvn clean package sonar:sonar"
+            }
+          }
+        }
+         stage("Quality Gate") {
+            timeout(time: 30, unit: 'SECONDS') { // Just in case something goes wrong, pipeline will be killed after a timeout
+            def qg = waitForQualityGate() // Reuse taskId previously collected by withSonarQubeEnv
+            if (qg.status != 'OK') {
+            error "Pipeline aborted due to quality gate failure: ${qg.status}"
+            }
+            }
+         }
+         
+         
+         
+  
+       stage('build'){
+       
+             withEnv( ["PATH+MAVEN=${mvnHome}/bin"] ) {
+             sh "mvn clean package"
+            }
+            withEnv(['JIRA_SITE=jira1']) {
+            jiraAddComment idOrKey: 'JENKY-1', comment: 'Build Successful.'
+                            
+            }
+             withEnv(['JIRA_SITE=jira1']) {
+                  def transitionInput =
+                             [transition: [id: '21']]
+                            jiraTransitionIssue idOrKey: 'JENKY-1', input: transitionInput
+             }
+         
+        }
+        
+        stage('Artifactory upload') {
+        def uploadSpec = """
+        { "files": [ { "pattern": "/var/lib/jenkins/workspace/sonarpipe/target/gspring.war", "target": "giri" } ] }"""
+            server.upload(uploadSpec)
+            
+            withEnv(['JIRA_SITE=jira1']) {
+                  def transitionInput =
+                             [transition: [id: '31']]
+                            jiraTransitionIssue idOrKey: 'JENKY-1', input: transitionInput
+             }
+            
+        }
+        stage('downloading artifact')
+        {
+        def downloadSpec="""{ "files":[ { "pattern":"giri/gspring.war", "target":"/var/lib/jenkins/workspace/jeeraintg/" } ] }"""
+        server.download(downloadSpec)
+        withEnv(['JIRA_SITE=jira1']) {
+                  def transitionInput =
+                             [transition: [id: '41']]
+                            jiraTransitionIssue idOrKey: 'JENKY-1', input: transitionInput
+             }
+        } 
+        stage('tomcat deploy'){
+            sh "scp -i /var/lib/jenkins/.ssh/id_rsa  /var/lib/jenkins/workspace/jeeraintg/target/gspring.war  giri1@girish.eastus.cloudapp.azure.com:/opt/apache-tomcat-8.5.14/webapps/"
+        }
+        
+        }
+        catch(err){
+            //jira new issue raising
+            withEnv(['JIRA_SITE=jira1']) {
+             def testIssue = [fields: [ 
+                               project: [key:'JENKY'],
+                               summary: 'New JIRA Created from Jenkins.',
+                               description: 'New JIRA Created from Jenkins.',
+                               issuetype: [name: 'Bug']]]
+
+            response = jiraNewIssue issue: testIssue
+
+            echo response.successful.toString()
+            echo response.data.toString()
+            }
+            withEnv(['JIRA_SITE=jira1']) {
+            jiraAssignIssue idOrKey: 'JENKY-1', userName: 'admin'
+             }
+            
+            withEnv(['JIRA_SITE=jira1']) {
+            jiraAddComment idOrKey: 'JENKY-1', comment: 'test commen: worked on it'
+            }
+
+
+            
+        //send email to respective person
+            mail subject:"${BUILD_NUMBER}-BUID STATUS",
+            body:    "It appears that ${BUILD_NUMBER}th build is failed, somebody should do something about that",
+            charset: 'UTF-8',
+            mimeType: 'text/html',
+            from:    '',
+            to:      'dotdupster@gmail.com'
+            currentBuild.result="FAILED"
+         }
+        
+}
